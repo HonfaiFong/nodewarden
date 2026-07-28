@@ -1,0 +1,85 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      target_commit:
+        description: "Commit hash or tag (leave blank to use upstream main)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/shuaiplus/NodeWarden.git || true
+          git fetch upstream --tags
+
+      - name: Resolve target commit
+        id: resolve
+        run: |
+          MANUAL_INPUT="${{ github.event.inputs.target_commit }}"
+
+          if [ -n "$MANUAL_INPUT" ]; then
+            TARGET_SHA=$(git rev-parse "$MANUAL_INPUT" 2>/dev/null)
+          else
+            TARGET_SHA=$(git rev-parse upstream/main)
+          fi
+
+          if [ -z "$TARGET_SHA" ]; then
+            echo "Cannot resolve upstream target."
+            exit 1
+          fi
+
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+          echo "Target: $TARGET_SHA"
+
+      - name: Merge upstream changes
+        run: |
+          TARGET_SHA="${{ steps.resolve.outputs.target_sha }}"
+
+          if git merge-base --is-ancestor "$TARGET_SHA" HEAD; then
+            echo "Already up to date with $TARGET_SHA."
+            exit 0
+          fi
+
+          if git merge "$TARGET_SHA" --no-commit --no-ff; then
+            git commit --no-edit
+          else
+            # Application-code conflicts always use the upstream version.
+            KEEP_SYNC_WORKFLOW=false
+            if git ls-files -u -- .github/workflows/sync-upstream.yml | grep -q .; then
+              KEEP_SYNC_WORKFLOW=true
+            fi
+
+            git checkout --theirs -- .
+            if [ "$KEEP_SYNC_WORKFLOW" = true ]; then
+              git checkout --ours -- .github/workflows/sync-upstream.yml
+            fi
+
+            git add -A
+            git commit --no-edit
+          fi
+
+      - name: Push
+        run: git push origin main
