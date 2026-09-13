@@ -55,11 +55,13 @@ jobs:
           echo "Target: $TARGET_SHA"
 
       - name: Merge upstream changes
+        id: merge
         run: |
           TARGET_SHA="${{ steps.resolve.outputs.target_sha }}"
 
           if git merge-base --is-ancestor "$TARGET_SHA" HEAD; then
             echo "Already up to date with $TARGET_SHA."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -67,19 +69,32 @@ jobs:
             git commit --no-edit
           else
             # Application-code conflicts always use the upstream version.
-            KEEP_SYNC_WORKFLOW=false
-            if git ls-files -u -- .github/workflows/sync-upstream.yml | grep -q .; then
-              KEEP_SYNC_WORKFLOW=true
+            KEEP_OURS=false
+            if git ls-files -u -- .github/workflows/sync-upstream.yml wrangler.prod.toml | grep -q .; then
+              KEEP_OURS=true
             fi
 
             git checkout --theirs -- .
-            if [ "$KEEP_SYNC_WORKFLOW" = true ]; then
-              git checkout --ours -- .github/workflows/sync-upstream.yml
+            if [ "$KEEP_OURS" = true ]; then
+              git checkout --ours -- .github/workflows/sync-upstream.yml wrangler.prod.toml
             fi
 
             git add -A
             git commit --no-edit
           fi
 
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
       - name: Push
+        if: steps.merge.outputs.changed == 'true'
         run: git push origin main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build & deploy nodewarden
+        if: steps.merge.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm ci && npx wrangler deploy --config wrangler.prod.toml
